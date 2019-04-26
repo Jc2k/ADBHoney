@@ -21,33 +21,55 @@ MAX_READ_COUNT = 4096 * 4096
 MAX_EMPTY_PACKETS = 360
 DEVICE_ID = 'device::http://ro.product.name =starltexx;ro.product.model=SM-G960F;ro.product.device=starlte;features=cmd,stat_v2,shell_v2'
 
-def log(message, CONFIG):
-    if CONFIG['logfile'] is None:
-        print(message)
-        sys.stdout.flush()
-    else:
-        with open(CONFIG['logfile'], 'a') as f:
-            print(message, file=f)
+class Logger:
 
-def jsonlog(obj, CONFIG):
-    if CONFIG['json_log'] is not None:
-        with open(CONFIG['json_log'], 'a') as f:
-            print(json.dumps(obj), file=f)
+    def __init__(self):
+        self.listeners = []
+
+    def publish(self, event):
+        for subscriber in list(self.listeners):
+            subscriber.put_nowait(event)
+
+    async def listen(self):
+        bus = asyncio.Queue()
+        self.listeners.append(bus)
+        try:
+            while True:
+                event = async bus.get()
+                yield event
+        finally:
+            self.listeners.pop(bus, None)
+
+
+async def log(CONFIG, logger):
+    async for event in logger.listen():
+        message = event['message']
+        if CONFIG['logfile'] is None:
+            print(message)
+            sys.stdout.flush()
+        else:
+            with open(CONFIG['logfile'], 'a') as f:
+                print(message, file=f)
+
+
+async def jsonlog(CONFIG, logger):
+    with open(CONFIG['json_log'], 'a') as fp:
+        async for event in logger.listen():
+            json.dump(obj, fp)
+            fp.flush()
 
 
 def getutctime():
     return datetime.datetime.utcnow().isoformat() + 'Z'
 
 
-def dump_file_data(addr, real_fname, data, session, CONFIG):
+def dump_file_data(log, addr, real_fname, data, session, CONFIG):
     shasum = hashlib.sha256(data).hexdigest()
     fname = 'data-{}.raw'.format(shasum)
     if CONFIG['download_dir'] and not os.path.exists(CONFIG['download_dir']):
         os.makedirs(CONFIG['download_dir'])
     fullname = os.path.join(CONFIG['download_dir'], fname)
-    log('{}\t{}\tfile:{} - dumping {} bytes of data to {}...'.format(
-        getutctime(), addr[0], real_fname, len(data), fullname), CONFIG)
-    obj = {
+    log.publish({
         'eventid': 'adbhoney.session.file_upload',
         'timestamp': getutctime(),
         'unixtime': int(time.time()),
@@ -57,8 +79,7 @@ def dump_file_data(addr, real_fname, data, session, CONFIG):
         'shasum': shasum,
         'outfile': fullname,
         'sensor': CONFIG['sensor']
-    }
-    jsonlog(obj, CONFIG)
+    })
     if not os.path.exists(fullname):
         with open(fullname, 'wb') as f:
             f.write(data)
@@ -87,15 +108,14 @@ def process_logging(comm_q, config):
                 dump_file_data(*obj_to_log)
 
 
-async def process_connection(reader, writer, addr, CONFIG, log_queue):
+async def process_connection(reader, writer, CONFIG, logger):
     start = time.time()
     session = binascii.hexlify(os.urandom(6))
 
     dest_ip, dest_port = writer.get_extra_info('sockname')
     src_ip, src_port = writer.get_extra_info('peername')
 
-    log_queue.put('{}\t{}\tconnection start ({})'.format(getutctime(), addr[0], session))
-    obj = {
+    logger.publish({
         'eventid': 'adbhoney.session.connect',
         'timestamp': getutctime(),
         'unixtime': int(start),
@@ -106,8 +126,8 @@ async def process_connection(reader, writer, addr, CONFIG, log_queue):
         'dst_ip': localip,
         'dst_port': CONFIG['port'],
         'sensor': CONFIG['sensor']
-    }
-    log_queue.put(obj)
+    })
+
     states = []
     sending_binary = False
     dropped_file = ''
@@ -156,7 +176,18 @@ async def process_connection(reader, writer, addr, CONFIG, log_queue):
             data = command + arg1 + arg2 + data_length_raw + data_crc + magic + data_content
         except Exception as ex:
             closedmessage = 'Connection reset by peer'
-            log_queue.put('{}\t{}\t {} : {}'.format(getutctime(), addr[0], repr(ex), repr(debug_content)))
+            logger.publish({
+                'eventid': 'adbhoney.session.exception',
+                'timestamp': getutctime(),
+                'unixtime': int(start),
+                'session': session,
+                'message': '{}\t{}\t {} : {}'.format(getutctime(), addr[0], repr(ex), repr(debug_content)),
+                'src_ip': addr[0],
+                'src_port': addr[1],
+                'dst_ip': localip,
+                'dst_port': CONFIG['port'],
+                'sensor': CONFIG['sensor']
+            })
             break
 
         try:
@@ -165,9 +196,9 @@ async def process_connection(reader, writer, addr, CONFIG, log_queue):
                 # print message
                 string = str(message)
                 if len(string) > 96:
-                    log_queue.put('<<<<{} ...... {}'.format(string[0:64], string[-32:]))
+                    print('<<<<{} ...... {}'.format(string[0:64], string[-32:]))
                 else:
-                    log_queue.put('<<<<{}'.format(string))
+                    print('<<<<{}'.format(string))
         except:
             # don't print anything, a lot of garbage coming in usually, just drop the connection
             break
@@ -190,7 +221,7 @@ async def process_connection(reader, writer, addr, CONFIG, log_queue):
             if 'DONE' in message.data:
                 dropped_file = dropped_file[:-8]
                 sending_binary = False
-                log_queue.put((addr, filename, dropped_file, session, CONFIG))
+                dump_file_data(logger, addr, filename, dropped_file, session, CONFIG)
                 # ADB has a shitty state machine, sometimes we need to send duplicate messages
                 send_twice(writer, protocol.CMD_WRTE, 2, message.arg0, 'OKAY', CONFIG)
                 #send_message(writer, protocol.CMD_WRTE, 2, message.arg0, 'OKAY', CONFIG)
@@ -221,7 +252,7 @@ async def process_connection(reader, writer, addr, CONFIG, log_queue):
                     send_twice(writer, protocol.CMD_WRTE, 2, message.arg0, 'OKAY', CONFIG)
                     send_twice(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
 
-                    log_queue.put((addr, filename, dropped_file, session, CONFIG))
+                    dump_file_data(logger, addr, filename, dropped_file, session, CONFIG)
                     continue
 
                 else:
@@ -254,8 +285,7 @@ async def process_connection(reader, writer, addr, CONFIG, log_queue):
                 send_message(writer, protocol.CMD_CLSE, 2, message.arg0, '', CONFIG)
                 # print the shell command that was sent
                 # also remove trailing \00
-                log_queue.put('{}\t{}\t{}'.format(getutctime(), addr[0], message.data[:-1]))
-                obj = {
+                logger.publish({
                     'eventid': 'adbhoney.command.input',
                     'timestamp': getutctime(),
                     'unixtime': int(time.time()),
@@ -264,8 +294,7 @@ async def process_connection(reader, writer, addr, CONFIG, log_queue):
                     'src_ip': addr[0],
                     'input': message.data[6:-1],
                     'sensor': CONFIG['sensor']
-                }
-                log_queue.put(obj)
+                })
             elif states[-1] == protocol.CMD_CNXN:
                 send_message(writer, protocol.CMD_CNXN, 0x01000000, 4096, DEVICE_ID, CONFIG)
             elif states[-1] == protocol.CMD_OPEN and 'sync' not in message.data:
@@ -281,8 +310,8 @@ async def process_connection(reader, writer, addr, CONFIG, log_queue):
         await writer.drain()
 
     duration = time.time() - start
-    log_queue.put('{}\t{}\tconnection closed ({})'.format(getutctime(), addr[0], session))
-    obj = {
+
+    logger.publish({
         'eventid': 'adbhoney.session.closed',
         'timestamp': getutctime(),
         'unixtime': int(time.time()),
@@ -291,8 +320,8 @@ async def process_connection(reader, writer, addr, CONFIG, log_queue):
         'src_ip': addr[0],
         'duration': duration,
         'sensor': CONFIG['sensor']
-    }
-    log_queue.put(obj)
+    })
+
     writer.close()
 
 
@@ -360,4 +389,11 @@ if __name__ == '__main__':
     CONFIG['sensor'] = args.sensor
     CONFIG['debug'] = args.debug
 
-    asyncio.run(main_connection_loop(CONFIG))
+    logger = Logger()
+
+    asyncio.create_task(log(CONFIG, logger))
+ 
+    if args.json_log:
+        asyncio.create_task(jsonlog(CONFIG, logger))
+
+    asyncio.run(main_connection_loop(CONFIG, logger))
