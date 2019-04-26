@@ -12,7 +12,8 @@ import struct
 import sys
 import time
 
-import protocol
+from . import protocol
+
 
 __VERSION__ = '1.00'
 
