@@ -2,15 +2,15 @@
 
 import argparse
 import asyncio
+import binascii
+import datetime
 import hashlib
+import json
 import os
 import socket
 import struct
 import sys
 import time
-import datetime
-import binascii
-import json
 
 import protocol
 
