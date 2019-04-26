@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from __future__ import print_function
+import asyncio
 import hashlib
 import os
 import protocol
@@ -13,7 +13,6 @@ import datetime
 import binascii
 import json
 from argparse import ArgumentParser
-from Queue import Queue
 
 __VERSION__ = '1.00'
 
@@ -35,19 +34,10 @@ def jsonlog(obj, CONFIG):
         with open(CONFIG['json_log'], 'a') as f:
             print(json.dumps(obj), file=f)
 
+
 def getutctime():
     return datetime.datetime.utcnow().isoformat() + 'Z'
 
-def getlocalip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(('10.255.255.255', 1))
-        ip = s.getsockname()[0]
-    except:
-        ip = '127.0.0.1'
-    finally:
-        s.close()
-    return ip
 
 def dump_file_data(addr, real_fname, data, session, CONFIG):
     shasum = hashlib.sha256(data).hexdigest()
@@ -73,15 +63,18 @@ def dump_file_data(addr, real_fname, data, session, CONFIG):
         with open(fullname, 'wb') as f:
             f.write(data)
 
-def send_message(conn, command, arg0, arg1, data, CONFIG):
+
+def send_message(writer, command, arg0, arg1, data, CONFIG):
     newmessage = protocol.AdbMessage(command, arg0, arg1, data)
     if CONFIG['debug']:
         print('>>>>{}'.format(newmessage))
-    conn.sendall(newmessage.encode())
+    writer.write(newmessage.encode())
 
-def send_twice(conn, command, arg0, arg1, data, CONFIG):
-    send_message(conn, command, arg0, arg1, data, CONFIG)
-    send_message(conn, command, arg0, arg1, data, CONFIG)
+
+def send_twice(writer, command, arg0, arg1, data, CONFIG):
+    send_message(writer, command, arg0, arg1, data, CONFIG)
+    send_message(writer, command, arg0, arg1, data, CONFIG)
+
 
 def process_logging(comm_q, config):
     while True:
@@ -93,10 +86,14 @@ def process_logging(comm_q, config):
         elif type(obj_to_log) is tuple:
                 dump_file_data(*obj_to_log)
 
-def process_connection(conn, addr, CONFIG, log_queue):
+
+async def process_connection(reader, writer, addr, CONFIG, log_queue):
     start = time.time()
     session = binascii.hexlify(os.urandom(6))
-    localip = getlocalip()
+
+    dest_ip, dest_port = writer.get_extra_info('sockname')
+    src_ip, src_port = writer.get_extra_info('peername')
+
     log_queue.put('{}\t{}\tconnection start ({})'.format(getutctime(), addr[0], session))
     obj = {
         'eventid': 'adbhoney.session.connect',
@@ -120,7 +117,7 @@ def process_connection(conn, addr, CONFIG, log_queue):
     while True:
         debug_content = bytes()
         try:
-            command = conn.recv(4)
+            command = await reader.read(4)
             if not command:
                 empty_packets += 1
                 if empty_packets > MAX_EMPTY_PACKETS:
@@ -130,15 +127,15 @@ def process_connection(conn, addr, CONFIG, log_queue):
                 continue
             empty_packets = 0
             debug_content += command
-            arg1 = conn.recv(4)
+            arg1 = await reader.read(4)
             debug_content += arg1
-            arg2 = conn.recv(4)
+            arg2 = await reader.read(4)
             debug_content += arg2
-            data_length_raw = conn.recv(4)
+            data_length_raw = await reader.read(4)
             debug_content += data_length_raw
             data_length = struct.unpack('<L', data_length_raw)[0]
-            data_crc = conn.recv(4)
-            magic = conn.recv(4)
+            data_crc = await reader.read(4)
+            magic = await reader.read(4)
             data_content = bytes()
 
             if data_length > 0:
@@ -150,7 +147,7 @@ def process_connection(conn, addr, CONFIG, log_queue):
                     read_count += 1
                     # don't overread the content of the next data packet
                     bytes_to_read = data_length - len(data_content)
-                    data_content += conn.recv(bytes_to_read)
+                    data_content += await reader.read(bytes_to_read)
             # check integrity of read data
             if len(data_content) < data_length:
                 # corrupt content, abort the connection (probably not an ADB client)
@@ -195,17 +192,17 @@ def process_connection(conn, addr, CONFIG, log_queue):
                 sending_binary = False
                 log_queue.put((addr, filename, dropped_file, session, CONFIG))
                 # ADB has a shitty state machine, sometimes we need to send duplicate messages
-                send_twice(conn, protocol.CMD_WRTE, 2, message.arg0, 'OKAY', CONFIG)
-                #send_message(conn, protocol.CMD_WRTE, 2, message.arg0, 'OKAY', CONFIG)
-                send_twice(conn, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
-                #send_message(conn, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                send_twice(writer, protocol.CMD_WRTE, 2, message.arg0, 'OKAY', CONFIG)
+                #send_message(writer, protocol.CMD_WRTE, 2, message.arg0, 'OKAY', CONFIG)
+                send_twice(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                #send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
                 continue
 
             if message.command != protocol.CMD_WRTE:
                 dropped_file += data
 
-            send_twice(conn, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
-            #send_message(conn, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+            send_twice(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+            #send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
 
         else:   # regular flow
             # look for the data header that is first sent when initiating a data connection
@@ -221,8 +218,8 @@ def process_connection(conn, addr, CONFIG, log_queue):
                         filename = predata.split(',')[0]
 
                     dropped_file = message.data.split('DATA')[1][4:-8]
-                    send_twice(conn, protocol.CMD_WRTE, 2, message.arg0, 'OKAY', CONFIG)
-                    send_twice(conn, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                    send_twice(writer, protocol.CMD_WRTE, 2, message.arg0, 'OKAY', CONFIG)
+                    send_twice(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
 
                     log_queue.put((addr, filename, dropped_file, session, CONFIG))
                     continue
@@ -233,28 +230,28 @@ def process_connection(conn, addr, CONFIG, log_queue):
                         filename = predata.split(',')[0]
                     dropped_file = message.data.split('DATA')[1][4:]
 
-                send_twice(conn, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                send_twice(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
                 continue
 
             if len(states) >= 2 and states[-2:] == [protocol.CMD_WRTE, protocol.CMD_WRTE]:
                 # last block of messages before the big block of data
                 filename = message.data
-                send_message(conn, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
                 # why do I have to send the command twice??? science damn it!
-                send_twice(conn, protocol.CMD_WRTE, 2, message.arg0, 'STAT\x07\x00\x00\x00', CONFIG)
+                send_twice(writer, protocol.CMD_WRTE, 2, message.arg0, 'STAT\x07\x00\x00\x00', CONFIG)
             elif len(states) > 2 and states[-2:] == [protocol.CMD_OKAY, protocol.CMD_WRTE]:
-                send_message(conn, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
-                # send_message(conn, protocol.CMD_WRTE, 2, message.arg0, 'FAIL', CONFIG)
+                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                # send_message(writer, protocol.CMD_WRTE, 2, message.arg0, 'FAIL', CONFIG)
             elif len(states) > 1 and states[-2:] == [protocol.CMD_OPEN, protocol.CMD_WRTE]:
-                send_message(conn, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
                 if len(message.data) > 8:
-                    send_twice(conn, protocol.CMD_WRTE, 2, message.arg0, 'STAT\x01\x00\x00\x00', CONFIG)
+                    send_twice(writer, protocol.CMD_WRTE, 2, message.arg0, 'STAT\x01\x00\x00\x00', CONFIG)
                     filename = message.data[8:]
             elif states[-1] == protocol.CMD_OPEN and 'shell' in message.data:
-                send_message(conn, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
                 # change the WRTE contents with whatever you'd like to send to the attacker
-                send_message(conn, protocol.CMD_WRTE, 2, message.arg0, '', CONFIG)
-                send_message(conn, protocol.CMD_CLSE, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_WRTE, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_CLSE, 2, message.arg0, '', CONFIG)
                 # print the shell command that was sent
                 # also remove trailing \00
                 log_queue.put('{}\t{}\t{}'.format(getutctime(), addr[0], message.data[:-1]))
@@ -270,16 +267,19 @@ def process_connection(conn, addr, CONFIG, log_queue):
                 }
                 log_queue.put(obj)
             elif states[-1] == protocol.CMD_CNXN:
-                send_message(conn, protocol.CMD_CNXN, 0x01000000, 4096, DEVICE_ID, CONFIG)
+                send_message(writer, protocol.CMD_CNXN, 0x01000000, 4096, DEVICE_ID, CONFIG)
             elif states[-1] == protocol.CMD_OPEN and 'sync' not in message.data:
-                send_message(conn, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
             elif states[-1] == protocol.CMD_OPEN:
-                send_message(conn, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
             elif states[-1] == protocol.CMD_CLSE and not sending_binary:
-                send_message(conn, protocol.CMD_CLSE, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_CLSE, 2, message.arg0, '', CONFIG)
             elif states[-1] == protocol.CMD_WRTE and 'QUIT' in message.data:
-                send_message(conn, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
-                send_message(conn, protocol.CMD_CLSE, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_CLSE, 2, message.arg0, '', CONFIG)
+
+        await writer.drain()
+
     duration = time.time() - start
     log_queue.put('{}\t{}\tconnection closed ({})'.format(getutctime(), addr[0], session))
     obj = {
@@ -293,9 +293,10 @@ def process_connection(conn, addr, CONFIG, log_queue):
         'sensor': CONFIG['sensor']
     }
     log_queue.put(obj)
-    conn.close()
+    writer.close()
 
-def main_coonection_loop(CONFIG):
+
+async def main_connection_loop(CONFIG):
     bind_addr = CONFIG['addr']
     bind_port = CONFIG['port']
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -320,22 +321,14 @@ def main_coonection_loop(CONFIG):
     s.bind((bind_addr, bind_port))
     s.listen(1)
     log('Listening on {}:{}.'.format(bind_addr, bind_port), CONFIG)
-    try:
-        while True:
-            conn, addr = s.accept()
-            log_queue = Queue()
-            thread = threading.Thread(target=process_connection, args=(conn, addr, CONFIG, log_queue))
-            thread.daemon = True
-            thread.start()
-            logging_thread = threading.Thread(target=process_logging, args=(log_queue, CONFIG))
-            logging_thread.daemon = True
-            logging_thread.start()
-    except KeyboardInterrupt:
-        log('Exiting...', CONFIG)
-        s.close()
+    server = await asyncio.start_server(
+        lambda reader, writer: process_connection(CONFIG, reader, writer),
+        sock=s,
+    )
+    await server.serve_forever()
+
 
 if __name__ == '__main__':
-
     CONFIG = {}
 
     # Eventually these will be filled from a config file
@@ -367,4 +360,4 @@ if __name__ == '__main__':
     CONFIG['sensor'] = args.sensor
     CONFIG['debug'] = args.debug
 
-    main_coonection_loop(CONFIG)
+    asyncio.run(main_connection_loop(CONFIG))
