@@ -7,7 +7,6 @@ import protocol
 import socket
 import struct
 import sys
-import threading
 import time
 import datetime
 import binascii
@@ -35,7 +34,7 @@ class Logger:
         self.listeners.append(bus)
         try:
             while True:
-                event = async bus.get()
+                event = await bus.get()
                 yield event
         finally:
             self.listeners.pop(bus, None)
@@ -108,17 +107,6 @@ def send_twice(writer, command, arg0, arg1, data, CONFIG):
     send_message(writer, command, arg0, arg1, data, CONFIG)
 
 
-def process_logging(comm_q, config):
-    while True:
-        obj_to_log = comm_q.get(True)
-        if type(obj_to_log) is dict:
-                jsonlog(obj_to_log, config)
-        elif type(obj_to_log) is str:
-                log(obj_to_log, config)
-        elif type(obj_to_log) is tuple:
-                dump_file_data(*obj_to_log)
-
-
 async def process_connection(reader, writer, CONFIG, logger):
     start = time.time()
     session = binascii.hexlify(os.urandom(6))
@@ -131,11 +119,11 @@ async def process_connection(reader, writer, CONFIG, logger):
         'timestamp': getutctime(),
         'unixtime': int(start),
         'session': session,
-        'message': 'New connection: {}:{} ({}:{}) [session: {}]'.format(addr[0], addr[1], localip, CONFIG['port'], session),
-        'src_ip': addr[0],
-        'src_port': addr[1],
-        'dst_ip': localip,
-        'dst_port': CONFIG['port'],
+        'message': 'New connection: {}:{} ({}:{}) [session: {}]'.format(src_ip, src_port, dest_ip, dest_port, session),
+        'src_ip': src_ip,
+        'src_port': src_port,
+        'dst_ip': dest_ip,
+        'dst_port': dest_port,
         'sensor': CONFIG['sensor']
     })
 
@@ -344,7 +332,7 @@ async def main_connection_loop(CONFIG):
         log(CONFIG, logger)
     ))
 
-    if args.json_log:
+    if args.jsonlog:
         tasks.append(asyncio.create_task(
             jsonlog(CONFIG, logger)
         ))
@@ -354,9 +342,11 @@ async def main_connection_loop(CONFIG):
             hpfeeds(CONFIG, logger),
         ))
 
-    bind_addr = CONFIG['addr']
-    bind_port = CONFIG['port']
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    if hasattr(socket, 'SO_REUSEPORT'):
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+
     """ Set TCP keepalive on an open socket.
 
         It activates after 1 second (after_idle_sec) of idleness,
@@ -373,13 +363,19 @@ async def main_connection_loop(CONFIG):
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
     if hasattr(socket, 'TCP_KEEPCNT'):
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 100)
+
     # pylint: enable=no-member
     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, True)
+
+    bind_addr = CONFIG['addr']
+    bind_port = CONFIG['port']
     s.bind((bind_addr, bind_port))
     s.listen(1)
-    log('Listening on {}:{}.'.format(bind_addr, bind_port), CONFIG)
+
+    print('Listening on {}:{}.'.format(bind_addr, bind_port), CONFIG)
+
     server = await asyncio.start_server(
-        lambda reader, writer: process_connection(CONFIG, reader, writer),
+        lambda reader, writer: process_connection(reader, writer, CONFIG, logger),
         sock=s,
     )
     tasks.append(server.serve_forever())
@@ -398,7 +394,7 @@ if __name__ == '__main__':
     CONFIG['sensor'] = socket.gethostname()
     CONFIG['debug'] = False
 
-    parser = ArgumentParser(version='%(prog)s version ' + __VERSION__, description='ADB Honeypot')
+    parser = ArgumentParser(prog='%(prog)s version ' + __VERSION__, description='ADB Honeypot')
 
     parser.add_argument('-a', '--addr', type=str, default=CONFIG['addr'], help='Address to bind to (default: {})'.format(CONFIG['addr']))
     parser.add_argument('-p', '--port', type=int, default=CONFIG['port'], help='Port to listen on (default: {})'.format(CONFIG['port']))
