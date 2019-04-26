@@ -45,7 +45,7 @@ class Logger:
 
 async def log(CONFIG, logger):
     async for event in logger.listen():
-        message = event['message']
+        message = event['message'].format(**event)
         if CONFIG['logfile'] is None:
             print(message)
             sys.stdout.flush()
@@ -85,9 +85,9 @@ def dump_file_data(log, real_fname, data, CONFIG):
     log.publish({
         **header,
         'eventid': 'adbhoney.session.file_upload',
-        'message': 'Downloaded file with SHA-256 {} to {}'.format(shasum, fullname),
         'shasum': shasum,
         'outfile': fullname,
+        'message': 'Downloaded file with SHA-256 {shasum} to {outfile}',
     })
     if not os.path.exists(fullname):
         with open(fullname, 'wb') as f:
@@ -108,7 +108,7 @@ def send_twice(writer, command, arg0, arg1, data, CONFIG):
 
 async def process_connection(reader, writer, CONFIG, logger):
     start = time.time()
-    session = binascii.hexlify(os.urandom(6))
+    session = binascii.hexlify(os.urandom(6)).decode('utf-8')
     dest_ip, dest_port = writer.get_extra_info('sockname')
     src_ip, src_port = writer.get_extra_info('peername')
 
@@ -124,7 +124,7 @@ async def process_connection(reader, writer, CONFIG, logger):
     logger.publish({
         **header,
         'eventid': 'adbhoney.session.connect',
-        'message': 'New connection: {}:{} ({}:{}) [session: {}]'.format(src_ip, src_port, dest_ip, dest_port, session),
+        'message': 'New connection: {src_ip}:{src_port} ({dst_ip}:{dst_port}) [session: {session}]',
     })
 
     states = []
@@ -172,7 +172,9 @@ async def process_connection(reader, writer, CONFIG, logger):
             logger.publish({
                 **header,
                 'eventid': 'adbhoney.session.exception',
-                'message': '{}\t{}\t {} : {}'.format(getutctime(), src_ip, repr(ex), repr(debug_content)),
+                'exc': repr(ex),
+                'debug_content': repr(debug_content),
+                'message': '{src_ip}\t {exc} : {debug_content}',
             })
             break
 
@@ -296,8 +298,9 @@ async def process_connection(reader, writer, CONFIG, logger):
     logger.publish({
         **header,
         'eventid': 'adbhoney.session.closed',
-        'message': '{} after {} seconds'.format(closedmessage, int(round(duration))),
+        'closedmessage': closedmessage,
         'duration': duration,
+        'message': '{closedmessage} after {duration} seconds',
     })
 
     writer.close()
