@@ -59,6 +59,17 @@ async def jsonlog(CONFIG, logger):
             fp.flush()
 
 
+async def hpfeeds(CONFIG, logger):
+    from hpfeeds.asyncio import ClientService
+
+    async with ClientService() as service:
+        for event in logger.listen():
+            service.publish(
+                'adbhoney',
+                event,
+            )
+
+
 def getutctime():
     return datetime.datetime.utcnow().isoformat() + 'Z'
 
@@ -336,6 +347,11 @@ async def main_connection_loop(CONFIG):
     if args.json_log:
         tasks.append(asyncio.create_task(
             jsonlog(CONFIG, logger)
+        ))
+
+    if False:
+        tasks.append(asyncio.create_task(
+            hpfeeds(CONFIG, logger),
         ))
 
     bind_addr = CONFIG['addr']
