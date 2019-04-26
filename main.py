@@ -326,6 +326,18 @@ async def process_connection(reader, writer, CONFIG, logger):
 
 
 async def main_connection_loop(CONFIG):
+    logger = Logger()
+
+    tasks = []
+    tasks.append(asyncio.create_task(
+        log(CONFIG, logger)
+    ))
+
+    if args.json_log:
+        tasks.append(asyncio.create_task(
+            jsonlog(CONFIG, logger)
+        ))
+
     bind_addr = CONFIG['addr']
     bind_port = CONFIG['port']
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -354,8 +366,9 @@ async def main_connection_loop(CONFIG):
         lambda reader, writer: process_connection(CONFIG, reader, writer),
         sock=s,
     )
-    await server.serve_forever()
+    tasks.append(server.serve_forever())
 
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 if __name__ == '__main__':
     CONFIG = {}
@@ -389,11 +402,4 @@ if __name__ == '__main__':
     CONFIG['sensor'] = args.sensor
     CONFIG['debug'] = args.debug
 
-    logger = Logger()
-
-    asyncio.create_task(log(CONFIG, logger))
- 
-    if args.json_log:
-        asyncio.create_task(jsonlog(CONFIG, logger))
-
-    asyncio.run(main_connection_loop(CONFIG, logger))
+    asyncio.run(main_connection_loop(CONFIG))
