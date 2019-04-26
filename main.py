@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import hashlib
 import os
-import protocol
 import socket
 import struct
 import sys
@@ -12,6 +11,8 @@ import time
 import datetime
 import binascii
 import json
+
+import protocol
 
 __VERSION__ = '1.00'
 
