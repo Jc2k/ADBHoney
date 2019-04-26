@@ -402,4 +402,8 @@ if __name__ == '__main__':
     CONFIG['sensor'] = args.sensor
     CONFIG['debug'] = args.debug
 
-    asyncio.run(main_connection_loop(CONFIG))
+    try:
+        asyncio.run(main_connection_loop(CONFIG))
+    except KeyboardInterrupt:
+        # Don't log an error on a SIGINT
+        pass
