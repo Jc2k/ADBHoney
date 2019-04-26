@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import argparse
 import asyncio
 import hashlib
 import os
@@ -11,7 +12,6 @@ import time
 import datetime
 import binascii
 import json
-from argparse import ArgumentParser
 
 __VERSION__ = '1.00'
 
@@ -376,14 +376,18 @@ if __name__ == '__main__':
     CONFIG['sensor'] = socket.gethostname()
     CONFIG['debug'] = False
 
-    parser = ArgumentParser(prog='%(prog)s version ' + __VERSION__, description='ADB Honeypot')
+    parser = argparse.ArgumentParser(
+        description='ADB Honeypot',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
 
-    parser.add_argument('-a', '--addr', type=str, default=CONFIG['addr'], help='Address to bind to (default: {})'.format(CONFIG['addr']))
-    parser.add_argument('-p', '--port', type=int, default=CONFIG['port'], help='Port to listen on (default: {})'.format(CONFIG['port']))
-    parser.add_argument('-d', '--dlfolder', type=str, default='', help='Directory for the uploaded samples (default: current)')
-    parser.add_argument('-l', '--logfile', type=str, default=None, help='Log file (default: stdout')
+    parser.add_argument('--version', action='version', version='%(prog)s version ' + __VERSION__)
+    parser.add_argument('-a', '--addr', type=str, default=CONFIG['addr'], help='Address to bind to')
+    parser.add_argument('-p', '--port', type=int, default=CONFIG['port'], help='Port to listen on')
+    parser.add_argument('-d', '--dlfolder', type=str, default='', help='Directory for the uploaded samples')
+    parser.add_argument('-l', '--logfile', type=str, default=None, help='Log file')
     parser.add_argument('-j', '--jsonlog', type=str, default=None, help='JSON log file')
-    parser.add_argument('-s', '--sensor', type=str, default=CONFIG['sensor'], help='Sensor name (default: {})'.format(CONFIG['sensor']))
+    parser.add_argument('-s', '--sensor', type=str, default=CONFIG['sensor'], help='Sensor name')
     parser.add_argument('--debug', action='store_true', help='Produce verbose output')
 
     args = parser.parse_args()
