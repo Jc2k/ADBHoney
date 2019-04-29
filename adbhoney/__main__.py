@@ -3,7 +3,6 @@
 import argparse
 import asyncio
 import binascii
-import datetime
 import hashlib
 import json
 import os
@@ -12,70 +11,13 @@ import struct
 import sys
 import time
 
-from . import protocol
+from . import loggers, protocol
 
 
 __VERSION__ = '1.00'
 
 MAX_READ_COUNT = 4096 * 4096
 DEVICE_ID = 'device::http://ro.product.name =starltexx;ro.product.model=SM-G960F;ro.product.device=starlte;features=cmd,stat_v2,shell_v2'
-
-class Logger:
-
-    def __init__(self):
-        self.listeners = set()
-
-    def publish(self, event):
-        msg = {
-            **event,
-            'timestamp': getutctime(),
-            'unixtime': int(time.time()),
-        }
-        for subscriber in list(self.listeners):
-            subscriber.put_nowait(event)
-
-    async def listen(self):
-        bus = asyncio.Queue()
-        self.listeners.add(bus)
-        try:
-            while True:
-                event = await bus.get()
-                yield event
-        finally:
-            self.listeners.discard(bus)
-
-
-async def log(CONFIG, logger):
-    async for event in logger.listen():
-        message = event['message'].format(**event)
-        if CONFIG['logfile'] is None:
-            print(message)
-            sys.stdout.flush()
-        else:
-            with open(CONFIG['logfile'], 'a') as f:
-                print(message, file=f)
-
-
-async def jsonlog(CONFIG, logger):
-    with open(CONFIG['json_log'], 'a') as fp:
-        async for event in logger.listen():
-            json.dump(obj, fp)
-            fp.flush()
-
-
-async def hpfeeds(CONFIG, logger):
-    from hpfeeds.asyncio import ClientService
-
-    async with ClientService() as service:
-        for event in logger.listen():
-            service.publish(
-                'adbhoney',
-                event,
-            )
-
-
-def getutctime():
-    return datetime.datetime.utcnow().isoformat() + 'Z'
 
 
 def dump_file_data(log, real_fname, data, CONFIG):
@@ -309,62 +251,66 @@ async def process_connection(reader, writer, CONFIG, logger):
 
 
 async def main_connection_loop(CONFIG):
-    logger = Logger()
-
     tasks = []
-    tasks.append(asyncio.create_task(
-        log(CONFIG, logger)
+
+    lgrs = loggers.Loggers()
+
+    # Always log to file or stdout
+    tasks.append(await lgrs.listen(
+        loggers.Logfile(CONFIG)
     ))
 
     if args.jsonlog:
-        tasks.append(asyncio.create_task(
-            jsonlog(CONFIG, logger)
+        tasks.append(await lgrs.listen(
+            loggers.JsonLogger(CONFIG)
         ))
 
     if False:
-        tasks.append(asyncio.create_task(
-            hpfeeds(CONFIG, logger),
+        tasks.append(await lgrs.listen(
+            loggers.HpfeedsLogger(CONFIG)
         ))
 
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    async with lgrs:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-    if hasattr(socket, 'SO_REUSEPORT'):
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        if hasattr(socket, 'SO_REUSEPORT'):
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
 
-    """ Set TCP keepalive on an open socket.
+        """ Set TCP keepalive on an open socket.
 
-        It activates after 1 second (after_idle_sec) of idleness,
-        then sends a keepalive ping once every 1 seconds (interval_sec),
-        and closes the connection after 100 failed ping (max_fails)
-    """
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-    # pylint: disable=no-member
-    if hasattr(socket, 'TCP_KEEPIDLE'):
-        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
-    elif hasattr(socket, 'TCP_KEEPALIVE'):
-        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 1)
-    if hasattr(socket, 'TCP_KEEPINTVL'):
-        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
-    if hasattr(socket, 'TCP_KEEPCNT'):
-        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 100)
+            It activates after 1 second (after_idle_sec) of idleness,
+            then sends a keepalive ping once every 1 seconds (interval_sec),
+            and closes the connection after 100 failed ping (max_fails)
+        """
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        # pylint: disable=no-member
+        if hasattr(socket, 'TCP_KEEPIDLE'):
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
+        elif hasattr(socket, 'TCP_KEEPALIVE'):
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 1)
+        if hasattr(socket, 'TCP_KEEPINTVL'):
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
+        if hasattr(socket, 'TCP_KEEPCNT'):
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 100)
 
-    # pylint: enable=no-member
-    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, True)
+        # pylint: enable=no-member
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, True)
 
-    bind_addr = CONFIG['addr']
-    bind_port = CONFIG['port']
-    s.bind((bind_addr, bind_port))
-    s.listen(1)
+        bind_addr = CONFIG['addr']
+        bind_port = CONFIG['port']
+        s.bind((bind_addr, bind_port))
+        s.listen(1)
 
-    print('Listening on {}:{}.'.format(bind_addr, bind_port), CONFIG)
+        print('Listening on {}:{}.'.format(bind_addr, bind_port), CONFIG)
 
-    server = await asyncio.start_server(
-        lambda reader, writer: process_connection(reader, writer, CONFIG, logger),
-        sock=s,
-    )
-    tasks.append(server.serve_forever())
+        server = await asyncio.start_server(
+            lambda reader, writer: process_connection(reader, writer, CONFIG, lgrs),
+            sock=s,
+        )
+        tasks.append(server.serve_forever())
 
-    await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
+
 
 if __name__ == '__main__':
     CONFIG = {}
