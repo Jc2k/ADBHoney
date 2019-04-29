@@ -28,26 +28,47 @@ def getCommandString(commandCode):
 
 
 class AdbMessage(object):
-    def __init__(self, command, arg0, arg1, data=''):
+    def __init__(self, command, arg0, arg1, data=b''):
         self.command = command
         self.arg0 = arg0
         self.arg1 = arg1
         self.data = data
 
     @property
+    def checksum(self):
+        # The checksum is just a sum of all the bytes. I swear.
+        data = self.data
+        if isinstance(data, bytearray):
+            total = sum(data)
+        elif isinstance(data, bytes):
+            if data and isinstance(data[0], bytes):
+                # Python 2 bytes (str) index as single-character strings.
+                total = sum(map(ord, data))
+            else:
+                # Python 3 bytes index as numbers (and PY2 empty strings sum() to 0)
+                total = sum(data)
+        else:
+            # Unicode strings (should never see?)
+            total = sum(map(ord, data))
+        print(total)
+        return total & 0xFFFFFFFF
+
+    @property
     def header(self):
-        data_check = sum(ord(c) for c in self.data)
+        data_check = sum(self.data) & 0xFFFFFFFF
+
         #data_check = '\xbc\xb1\xa7\xb1'
         #data_check = ''
         #import zlib
         #data_check = zlib.crc32(self.data)
         magic = self.command ^ 0xffffffff
-        return AdbMessageHeader(self.command,
+        header = AdbMessageHeader(self.command,
                                 self.arg0,
                                 self.arg1,
                                 len(self.data),
-                                data_check,
+                                self.checksum,
                                 magic)
+        return header
 
     @classmethod
     def decode(cls, data):

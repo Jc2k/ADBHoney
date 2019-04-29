@@ -17,31 +17,26 @@ from . import loggers, protocol
 __VERSION__ = '1.00'
 
 MAX_READ_COUNT = 4096 * 4096
-DEVICE_ID = 'device::http://ro.product.name =starltexx;ro.product.model=SM-G960F;ro.product.device=starlte;features=cmd,stat_v2,shell_v2'
+DEVICE_ID = b'device::http://ro.product.name =starltexx;ro.product.model=SM-G960F;ro.product.device=starlte;features=cmd,stat_v2,shell_v2'
 
 
-def dump_file_data(log, real_fname, data, CONFIG):
+def dump_file_data(log, header, filename, data):
     shasum = hashlib.sha256(data).hexdigest()
-    fname = 'data-{}.raw'.format(shasum)
-    if CONFIG['download_dir'] and not os.path.exists(CONFIG['download_dir']):
-        os.makedirs(CONFIG['download_dir'])
-    fullname = os.path.join(CONFIG['download_dir'], fname)
     log.publish({
         **header,
         'eventid': 'adbhoney.session.file_upload',
+        'filename': filename,
         'shasum': shasum,
-        'outfile': fullname,
-        'message': 'Downloaded file with SHA-256 {shasum} to {outfile}',
+        'data': data,
+        'message': 'Downloaded file with name {filename} and SHA-256 {shasum}',
     })
-    if not os.path.exists(fullname):
-        with open(fullname, 'wb') as f:
-            f.write(data)
 
 
 def send_message(writer, command, arg0, arg1, data, CONFIG):
     newmessage = protocol.AdbMessage(command, arg0, arg1, data)
-    if CONFIG['debug']:
+    if CONFIG['debug'] or True:
         print('>>>>{}'.format(newmessage))
+        print(newmessage.encode())
     writer.write(newmessage.encode())
 
 
@@ -79,23 +74,23 @@ async def process_connection(reader, writer, CONFIG, logger):
     while True:
         debug_content = bytes()
         try:
-            command = await reader.read(4)
+            command = await reader.readexactly(4)
             if not command:
                 break
             debug_content += command
-            arg1 = await reader.read(4)
+            arg1 = await reader.readexactly(4)
             debug_content += arg1
-            arg2 = await reader.read(4)
+            arg2 = await reader.readexactly(4)
             debug_content += arg2
-            data_length_raw = await reader.read(4)
+            data_length_raw = await reader.readexactly(4)
             debug_content += data_length_raw
-            print(len(data_length_raw))
             data_length = struct.unpack('<L', data_length_raw)[0]
-            data_crc = await reader.read(4)
-            magic = await reader.read(4)
+            data_crc = await reader.readexactly(4)
+            magic = await reader.readexactly(4)
             data_content = bytes()
 
             if data_length > 0:
+                data_content = await reader.readexactly(data_length)
                 # prevent reading the same stuff over and over again from some other attackers and locking the honeypot
                 # max 1 byte read 64*4096 times (max packet length for ADB)
                 read_count = 0
@@ -142,20 +137,20 @@ async def process_connection(reader, writer, CONFIG, logger):
         if sending_binary:
             # look for that shitty DATAXXXX where XXXX is the length of the data block that's about to be sent
             # (i.e. DATA\x00\x00\x01\x00)
-            if message.command == protocol.CMD_WRTE and 'DATA' in message.data:
-                data_index = message.data.index('DATA')
+            if message.command == protocol.CMD_WRTE and b'DATA' in message.data:
+                data_index = message.data.index(b'DATA')
                 payload_fragment = message.data[:data_index] + message.data[data_index + 8:]
                 dropped_file += payload_fragment
             elif message.command == protocol.CMD_WRTE:
                 dropped_file += message.data
 
             # truncate
-            if 'DONE' in message.data:
+            if b'DONE' in message.data:
                 dropped_file = dropped_file[:-8]
                 sending_binary = False
-                dump_file_data(logger, header, filename, dropped_file, CONFIG)
+                dump_file_data(logger, header, filename, dropped_file)
                 # ADB has a shitty state machine, sometimes we need to send duplicate messages
-                send_twice(writer, protocol.CMD_WRTE, 2, message.arg0, 'OKAY', CONFIG)
+                send_twice(writer, protocol.CMD_WRTE, 2, message.arg0, b'OKAY', CONFIG)
                 #send_message(writer, protocol.CMD_WRTE, 2, message.arg0, 'OKAY', CONFIG)
                 send_twice(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
                 #send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
@@ -170,51 +165,51 @@ async def process_connection(reader, writer, CONFIG, logger):
         else:   # regular flow
             # look for the data header that is first sent when initiating a data connection
             '''  /sdcard/stuff/exfiltrator-network-io.PNG,33206DATA '''
-            if 'DATA' in message.data[:128]:
+            if b'DATA' in message.data[:128]:
                 sending_binary = True
                 dropped_file = ''
                 # if the message is really short, wrap it up
-                if 'DONE' in message.data[-8:]:
+                if b'DONE' in message.data[-8:]:
                     sending_binary = False
-                    predata = message.data.split('DATA')[0]
+                    predata = message.data.split(b'DATA')[0]
                     if predata:
-                        filename = predata.split(',')[0]
+                        filename = predata.split(b',')[0]
 
-                    dropped_file = message.data.split('DATA')[1][4:-8]
-                    send_twice(writer, protocol.CMD_WRTE, 2, message.arg0, 'OKAY', CONFIG)
-                    send_twice(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                    dropped_file = message.data.split(b'DATA')[1][4:-8]
+                    send_twice(writer, protocol.CMD_WRTE, 2, message.arg0, b'OKAY', CONFIG)
+                    send_twice(writer, protocol.CMD_OKAY, 2, message.arg0, b'', CONFIG)
 
-                    dump_file_data(logger, header, filename, dropped_file, CONFIG)
+                    dump_file_data(logger, header, filename, dropped_file)
                     continue
 
                 else:
-                    predata = message.data.split('DATA')[0]
+                    predata = message.data.split(b'DATA')[0]
                     if predata:
-                        filename = predata.split(',')[0]
-                    dropped_file = message.data.split('DATA')[1][4:]
+                        filename = predata.split(b',')[0]
+                    dropped_file = message.data.split(b'DATA')[1][4:]
 
-                send_twice(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                send_twice(writer, protocol.CMD_OKAY, 2, message.arg0, b'', CONFIG)
                 continue
 
             if len(states) >= 2 and states[-2:] == [protocol.CMD_WRTE, protocol.CMD_WRTE]:
                 # last block of messages before the big block of data
                 filename = message.data
-                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, b'', CONFIG)
                 # why do I have to send the command twice??? science damn it!
-                send_twice(writer, protocol.CMD_WRTE, 2, message.arg0, 'STAT\x07\x00\x00\x00', CONFIG)
+                send_twice(writer, protocol.CMD_WRTE, 2, message.arg0, b'STAT\x07\x00\x00\x00', CONFIG)
             elif len(states) > 2 and states[-2:] == [protocol.CMD_OKAY, protocol.CMD_WRTE]:
-                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
-                # send_message(writer, protocol.CMD_WRTE, 2, message.arg0, 'FAIL', CONFIG)
+                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, b'', CONFIG)
+                # send_message(writer, protocol.CMD_WRTE, 2, message.arg0, b'FAIL', CONFIG)
             elif len(states) > 1 and states[-2:] == [protocol.CMD_OPEN, protocol.CMD_WRTE]:
-                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, b'', CONFIG)
                 if len(message.data) > 8:
-                    send_twice(writer, protocol.CMD_WRTE, 2, message.arg0, 'STAT\x01\x00\x00\x00', CONFIG)
+                    send_twice(writer, protocol.CMD_WRTE, 2, message.arg0, b'STAT\x01\x00\x00\x00', CONFIG)
                     filename = message.data[8:]
-            elif states[-1] == protocol.CMD_OPEN and 'shell' in message.data:
-                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+            elif states[-1] == protocol.CMD_OPEN and b'shell' in message.data:
+                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, b'', CONFIG)
                 # change the WRTE contents with whatever you'd like to send to the attacker
-                send_message(writer, protocol.CMD_WRTE, 2, message.arg0, '', CONFIG)
-                send_message(writer, protocol.CMD_CLSE, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_WRTE, 2, message.arg0, b'', CONFIG)
+                send_message(writer, protocol.CMD_CLSE, 2, message.arg0, b'', CONFIG)
                 # print the shell command that was sent
                 # also remove trailing \00
                 logger.publish({
@@ -225,15 +220,15 @@ async def process_connection(reader, writer, CONFIG, logger):
                 })
             elif states[-1] == protocol.CMD_CNXN:
                 send_message(writer, protocol.CMD_CNXN, 0x01000000, 4096, DEVICE_ID, CONFIG)
-            elif states[-1] == protocol.CMD_OPEN and 'sync' not in message.data:
-                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+            elif states[-1] == protocol.CMD_OPEN and b'sync' not in message.data:
+                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, b'', CONFIG)
             elif states[-1] == protocol.CMD_OPEN:
-                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, b'', CONFIG)
             elif states[-1] == protocol.CMD_CLSE and not sending_binary:
-                send_message(writer, protocol.CMD_CLSE, 2, message.arg0, '', CONFIG)
-            elif states[-1] == protocol.CMD_WRTE and 'QUIT' in message.data:
-                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, '', CONFIG)
-                send_message(writer, protocol.CMD_CLSE, 2, message.arg0, '', CONFIG)
+                send_message(writer, protocol.CMD_CLSE, 2, message.arg0, b'', CONFIG)
+            elif states[-1] == protocol.CMD_WRTE and b'QUIT' in message.data:
+                send_message(writer, protocol.CMD_OKAY, 2, message.arg0, b'', CONFIG)
+                send_message(writer, protocol.CMD_CLSE, 2, message.arg0, b'', CONFIG)
 
         await writer.drain()
 
